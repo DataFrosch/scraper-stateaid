@@ -22,7 +22,7 @@ def configure_session(
             "",
         ],
         "countries": [
-            "CountryEIB",
+            "CountryNLD",
         ],
         "lang": "en",
     }
@@ -49,7 +49,7 @@ def configure_session(
     data = [
         ("resetSearch", "true"),
         ("_countries", ""),
-        ("countries", "CountryEIB"),
+        ("countries", "CountryNLD"),
     ]
 
     response = session.post(
@@ -62,7 +62,7 @@ def scrape(output_dir="rawdata"):
     data = {
         "resetSearch": "true",
         "countries": [
-            "CountryEIB",
+            "CountryNLD",
         ],
         "grantingAuthorityRegions": [],
         "aidMeasureTitle": "",
@@ -171,15 +171,18 @@ def extract_data_from_html(file_path):
                     value = clean_text(cell.text_content())
 
                 # Special handling for amount values
-                if "Amount" in header:
+                if (
+                    "Amount" in header
+                    or header == "Aid element, expressed as full amount"
+                ):
                     # Try to extract the numeric part and currency
                     amount_match = (
                         re.match(r"([\d,.]+)\s*([A-Z]{3})?", value) if value else None
                     )
                     if amount_match:
                         amount, currency = amount_match.groups()
-                        # Remove commas and convert to float
-                        amount = float(amount.replace(",", ""))
+                        # Remove commas and convert to integer
+                        amount = int(float(amount.replace(",", "")))
                         row[header] = amount
                         if currency and "Currency" not in row:
                             row["Currency"] = currency
@@ -216,7 +219,7 @@ def setup_database(db_params):
         aid_instrument TEXT,
         aid_objectives TEXT,
         nominal_amount NUMERIC,
-        granted_amount NUMERIC,
+        aid_element NUMERIC,
         currency TEXT,
         date_granted DATE,
         granting_authority_name TEXT,
@@ -253,7 +256,7 @@ def insert_data(conn, cursor, data_rows, file_name):
         "Aid Instrument": "aid_instrument",
         "Objectives of the Aid": "aid_objectives",
         "Nominal Amount, expressed as full amount": "nominal_amount",
-        "Aid element, expressed as full amount": "granted_amount",
+        "Aid element, expressed as full amount": "aid_element",
         "Date of granting": "date_granted",
         "Granting Authority Name": "granting_authority_name",
         "Entrusted Entity": "entrusted_entity",
@@ -341,20 +344,22 @@ def cli():
 
 
 @cli.command()
-@click.option('--output-dir', default='rawdata', help='Directory to save scraped HTML files')
+@click.option(
+    "--output-dir", default="rawdata", help="Directory to save scraped HTML files"
+)
 def download(output_dir):
     """Scrape data from the EU State Aid Transparency Register."""
     # Ensure output directory exists
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-        
+
     click.echo(f"Downloading data to {output_dir}...")
     scrape(output_dir)
     click.echo("Download completed!")
 
 
 @cli.command()
-@click.option('--input-dir', default='rawdata', help='Directory containing HTML files')
+@click.option("--input-dir", default="rawdata", help="Directory containing HTML files")
 def import_data(input_dir):
     """Parse HTML files and import data into PostgreSQL database."""
     # Database connection parameters from environment variables
@@ -365,7 +370,7 @@ def import_data(input_dir):
         "host": os.getenv("DB_HOST", "localhost"),
         "port": os.getenv("DB_PORT", "5432"),
     }
-    
+
     click.echo(f"Importing data from {input_dir}...")
     process_html_folder(input_dir, db_params)
     click.echo("Import completed!")
