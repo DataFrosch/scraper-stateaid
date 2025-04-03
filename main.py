@@ -81,7 +81,6 @@ def scrape(output_dir="rawdata"):
         "nominalAmountTo": "",
         "grantedAmountFrom": "",
         "grantedAmountTo": "",
-        "currency": "LOCAL",
         "dateGrantedFrom": "",
         "dateGrantedTo": "",
         "grantingAuthorityNames": "",
@@ -180,14 +179,12 @@ def extract_data_from_html(file_path):
                         re.match(r"([\d,.]+)\s*([A-Z]{3})?", value) if value else None
                     )
                     if amount_match:
-                        amount, currency = amount_match.groups()
+                        amount = amount_match.group(1)
                         # Remove commas and convert to integer
                         amount = int(float(amount.replace(",", "")))
                         row[header] = amount
-                        if currency and "Currency" not in row:
-                            row["Currency"] = currency
                     else:
-                        row[header] = value
+                        row[header] = None
                 else:
                     row[header] = value
 
@@ -227,8 +224,7 @@ def setup_database(db_params):
         financial_intermediaries TEXT,
         published_date DATE,
         beneficiary_ms TEXT,
-        third_party_non_eu_country TEXT,
-        file_source TEXT
+        third_party_non_eu_country TEXT
     );
     """
     )
@@ -269,8 +265,6 @@ def insert_data(conn, cursor, data_rows, file_name):
     # Prepare data for insertion
     insert_data = []
     for row in data_rows:
-        db_row = {"file_source": file_name}
-
         for html_col, db_col in column_mapping.items():
             if html_col in row:
                 value = row[html_col]
@@ -287,14 +281,10 @@ def insert_data(conn, cursor, data_rows, file_name):
 
                 db_row[db_col] = value
 
-        # Add currency if found
-        if "Currency" in row:
-            db_row["currency"] = row["Currency"]
-
         insert_data.append(db_row)
 
     # Prepare SQL statement with all possible columns
-    columns = list(column_mapping.values()) + ["file_source", "currency"]
+    columns = list(column_mapping.values())
     placeholders = [f"%({col})s" for col in columns]
 
     sql = f"""
