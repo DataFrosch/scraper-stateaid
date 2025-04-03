@@ -217,7 +217,6 @@ def setup_database(db_params):
         aid_objectives TEXT,
         nominal_amount NUMERIC,
         aid_element NUMERIC,
-        currency TEXT,
         date_granted DATE,
         granting_authority_name TEXT,
         entrusted_entity TEXT,
@@ -265,6 +264,8 @@ def insert_data(conn, cursor, data_rows, file_name):
     # Prepare data for insertion
     insert_data = []
     for row in data_rows:
+        db_row = {}
+
         for html_col, db_col in column_mapping.items():
             if html_col in row:
                 value = row[html_col]
