@@ -1,4 +1,5 @@
 import re
+import requests
 from requests import Session
 from lxml.html import fromstring
 from time import sleep
@@ -169,8 +170,12 @@ def extract_data_from_html(file_path):
                 else:
                     value = clean_text(cell.text_content())
 
+                # Special handling for National ID column
+                if header == "National ID" and title:
+                    row[header] = clean_text(cell.text_content())
+                    row[header + " Type"] = clean_text(title)
                 # Special handling for amount values
-                if (
+                elif (
                     "Amount" in header
                     or header == "Aid element, expressed as full amount"
                 ):
@@ -209,6 +214,7 @@ def setup_database(db_params):
         sa_number TEXT,
         ref_no TEXT,
         national_id TEXT,
+        national_id_type TEXT,
         beneficiary_name TEXT,
         beneficiary_type TEXT,
         region TEXT,
@@ -223,7 +229,11 @@ def setup_database(db_params):
         financial_intermediaries TEXT,
         published_date DATE,
         beneficiary_ms TEXT,
-        third_party_non_eu_country TEXT
+        third_party_non_eu_country TEXT,
+        street TEXT,
+        house_number TEXT,
+        postal_code TEXT,
+        city TEXT
     );
     """
     )
@@ -244,6 +254,7 @@ def insert_data(conn, cursor, data_rows, file_name):
         "SA.Number": "sa_number",
         "Ref-no.": "ref_no",
         "National ID": "national_id",
+        "National ID Type": "national_id_type",
         "Name of the beneficiary": "beneficiary_name",
         "Beneficiary Type": "beneficiary_type",
         "Region": "region",
@@ -365,6 +376,230 @@ def import_data(input_dir):
     click.echo(f"Importing data from {input_dir}...")
     process_html_folder(input_dir, db_params)
     click.echo("Import completed!")
+
+
+@cli.command()
+def enrich_kvk_data():
+    """Enrich database with address data from KvK for entities with KvK nummer."""
+    import time
+    import logging
+
+    # Set up logging
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+    logger = logging.getLogger("kvk_enrichment")
+
+    # Database connection parameters from environment variables
+    db_params = {
+        "dbname": os.getenv("DB_NAME", "state_aid_db"),
+        "user": os.getenv("DB_USER", "postgres"),
+        "password": os.getenv("DB_PASSWORD", ""),
+        "host": os.getenv("DB_HOST", "localhost"),
+        "port": os.getenv("DB_PORT", "5432"),
+    }
+
+    # Connect to the database
+    conn = psycopg2.connect(**db_params)
+    cursor = conn.cursor()
+
+    # Query to select entities with national_id_type = 'KvK nummer'
+    cursor.execute(
+        """
+        SELECT id, national_id 
+        FROM state_aid_awards 
+        WHERE national_id_type = 'KvK nummer'
+    """
+    )
+
+    entities = cursor.fetchall()
+    logger.info(f"Found {len(entities)} entities with KvK numbers to enrich.")
+    click.echo(f"Found {len(entities)} entities with KvK numbers to enrich.")
+
+    # API request headers
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
+        "Accept": "application/json, application/hal+json",
+        "Accept-Language": "en-US,en;q=0.5",
+        "profileId": "5C10A89D-635E-49CC-94B8-042DD533B64A",
+        "Origin": "https://www.kvk.nl",
+        "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        "Priority": "u=0",
+    }
+
+    # Prepare update batches
+    update_data = []
+    skipped_count = 0
+    success_count = 0
+    failed_count = 0
+
+    for entity_id, kvk_number in entities:
+        # Clean KvK number (remove any non-digits)
+        clean_kvk = re.sub(r"\D", "", kvk_number) if kvk_number else None
+
+        if not clean_kvk:
+            logger.warning(
+                f"Skipping entity ID {entity_id}: Invalid KvK number '{kvk_number}'"
+            )
+            skipped_count += 1
+            continue
+
+        # API request parameters
+        params = {
+            "q": clean_kvk,
+            "language": "nl",
+            "site": "kvk2014",
+            "size": "10",
+            "start": "0",
+        }
+
+        try:
+            logger.info(
+                f"Making request for KvK number {clean_kvk} (entity ID: {entity_id})"
+            )
+            response = requests.get(
+                "https://web-api.kvk.nl/zoeken/v3/search",
+                params=params,
+                headers=headers,
+            )
+
+            # Log every request, successful or not
+            logger.info(
+                f"KvK API response for {clean_kvk}: status code {response.status_code}"
+            )
+
+            if response.status_code == 200:
+                success_count += 1
+                data = response.json()
+
+                # Try to find the main establishment (Hoofdvestiging)
+                address_found = False
+
+                if "data" in data and "items" in data["data"]:
+                    # First look for Hoofdvestiging
+                    for item in data["data"]["items"]:
+                        if (
+                            item.get("vestiging")
+                            and item.get("inschrijvingstype") == "Hoofdvestiging"
+                        ):
+                            bezoeklocatie = item.get("bezoeklocatie", {})
+                            if bezoeklocatie:
+                                update_data.append(
+                                    {
+                                        "id": entity_id,
+                                        "street": bezoeklocatie.get("straat"),
+                                        "house_number": bezoeklocatie.get("huisnummer"),
+                                        "postal_code": bezoeklocatie.get("postcode"),
+                                        "city": bezoeklocatie.get("plaats"),
+                                    }
+                                )
+                                address_found = True
+                                logger.info(
+                                    f"Found Hoofdvestiging address for KvK {clean_kvk}"
+                                )
+                                break
+
+                    # If no Hoofdvestiging with address, try any vestiging
+                    if not address_found:
+                        for item in data["data"]["items"]:
+                            if item.get("vestiging") and "bezoeklocatie" in item:
+                                bezoeklocatie = item.get("bezoeklocatie", {})
+                                if bezoeklocatie:
+                                    update_data.append(
+                                        {
+                                            "id": entity_id,
+                                            "street": bezoeklocatie.get("straat"),
+                                            "house_number": bezoeklocatie.get(
+                                                "huisnummer"
+                                            ),
+                                            "postal_code": bezoeklocatie.get(
+                                                "postcode"
+                                            ),
+                                            "city": bezoeklocatie.get("plaats"),
+                                        }
+                                    )
+                                    address_found = True
+                                    logger.info(
+                                        f"Found vestiging address for KvK {clean_kvk}"
+                                    )
+                                    break
+
+                    if not address_found:
+                        logger.warning(
+                            f"No address found for KvK {clean_kvk} despite 200 response"
+                        )
+                else:
+                    logger.warning(
+                        f"No data or items found in response for KvK {clean_kvk}"
+                    )
+            else:
+                # Log failed requests with response body
+                failed_count += 1
+                try:
+                    response_body = response.text[
+                        :500
+                    ]  # Limit response body size in logs
+                    logger.error(
+                        f"Failed request for KvK {clean_kvk}: Status {response.status_code}, Response: {response_body}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed request for KvK {clean_kvk}: Status {response.status_code}, Couldn't extract response body: {str(e)}"
+                    )
+
+            # Add a small delay to avoid hitting rate limits
+            time.sleep(0.5)
+
+        except Exception as e:
+            failed_count += 1
+            logger.error(f"Exception processing KvK number {clean_kvk}: {str(e)}")
+            click.echo(f"Error processing KvK number {clean_kvk}: {str(e)}")
+
+        # Provide progress feedback
+        if (len(update_data) + skipped_count + failed_count) % 10 == 0:
+            progress_msg = f"Processed {len(update_data) + skipped_count + failed_count} of {len(entities)} entities..."
+            logger.info(progress_msg)
+            click.echo(progress_msg)
+
+    # Update the database with address information
+    if update_data:
+        update_sql = """
+        UPDATE state_aid_awards
+        SET 
+            street = %(street)s,
+            house_number = %(house_number)s,
+            postal_code = %(postal_code)s,
+            city = %(city)s
+        WHERE id = %(id)s
+        """
+
+        execute_batch(cursor, update_sql, update_data, page_size=100)
+        conn.commit()
+
+        logger.info(f"Updated {len(update_data)} entities with address information.")
+        click.echo(f"Updated {len(update_data)} entities with address information.")
+    else:
+        logger.warning("No address information found for any entities.")
+        click.echo("No address information found for any entities.")
+
+    # Log summary statistics
+    summary = (
+        f"KvK enrichment summary: "
+        f"Total processed: {len(entities)}, "
+        f"Successful requests: {success_count}, "
+        f"Failed requests: {failed_count}, "
+        f"Skipped (invalid KvK): {skipped_count}, "
+        f"Updates made: {len(update_data)}"
+    )
+    logger.info(summary)
+    click.echo(summary)
+
+    # Close database connection
+    cursor.close()
+    conn.close()
 
 
 if __name__ == "__main__":
