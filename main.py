@@ -479,33 +479,33 @@ def enrich_kvk_data():
                 address_found = False
 
                 if "data" in data and "items" in data["data"]:
-                    # First look for Hoofdvestiging
-                    for item in data["data"]["items"]:
-                        if (
-                            item.get("vestiging")
-                            and item.get("inschrijvingstype") == "Hoofdvestiging"
-                        ):
-                            bezoeklocatie = item.get("bezoeklocatie", {})
-                            if bezoeklocatie:
-                                update_data.append(
-                                    {
-                                        "id": entity_id,
-                                        "street": bezoeklocatie.get("straat"),
-                                        "house_number": bezoeklocatie.get("huisnummer"),
-                                        "postal_code": bezoeklocatie.get("postcode"),
-                                        "city": bezoeklocatie.get("plaats"),
-                                    }
-                                )
-                                address_found = True
-                                logger.info(
-                                    f"Found Hoofdvestiging address for KvK {clean_kvk}"
-                                )
-                                break
+                    items = data["data"]["items"]
 
-                    # If no Hoofdvestiging with address, try any vestiging
-                    if not address_found:
-                        for item in data["data"]["items"]:
-                            if item.get("vestiging") and "bezoeklocatie" in item:
+                    # If there's only one result, use it directly
+                    if len(items) == 1:
+                        item = items[0]
+                        bezoeklocatie = item.get("bezoeklocatie", {})
+                        if bezoeklocatie:
+                            update_data.append(
+                                {
+                                    "id": entity_id,
+                                    "street": bezoeklocatie.get("straat"),
+                                    "house_number": bezoeklocatie.get("huisnummer"),
+                                    "postal_code": bezoeklocatie.get("postcode"),
+                                    "city": bezoeklocatie.get("plaats"),
+                                }
+                            )
+                            address_found = True
+                            logger.info(
+                                f"Found single result address for KvK {clean_kvk}"
+                            )
+                    else:
+                        # First look for Hoofdvestiging
+                        for item in items:
+                            if (
+                                item.get("vestiging")
+                                and item.get("inschrijvingstype") == "Hoofdvestiging"
+                            ):
                                 bezoeklocatie = item.get("bezoeklocatie", {})
                                 if bezoeklocatie:
                                     update_data.append(
@@ -523,9 +523,34 @@ def enrich_kvk_data():
                                     )
                                     address_found = True
                                     logger.info(
-                                        f"Found vestiging address for KvK {clean_kvk}"
+                                        f"Found Hoofdvestiging address for KvK {clean_kvk}"
                                     )
                                     break
+
+                        # If no Hoofdvestiging with address, try any vestiging
+                        if not address_found:
+                            for item in items:
+                                if item.get("vestiging") and "bezoeklocatie" in item:
+                                    bezoeklocatie = item.get("bezoeklocatie", {})
+                                    if bezoeklocatie:
+                                        update_data.append(
+                                            {
+                                                "id": entity_id,
+                                                "street": bezoeklocatie.get("straat"),
+                                                "house_number": bezoeklocatie.get(
+                                                    "huisnummer"
+                                                ),
+                                                "postal_code": bezoeklocatie.get(
+                                                    "postcode"
+                                                ),
+                                                "city": bezoeklocatie.get("plaats"),
+                                            }
+                                        )
+                                        address_found = True
+                                        logger.info(
+                                            f"Found vestiging address for KvK {clean_kvk}"
+                                        )
+                                        break
 
                     if not address_found:
                         logger.warning(
