@@ -211,7 +211,12 @@ def scrape_and_process(db_params):
 
     # Connect to the database
     conn, cursor = setup_database(db_params)
-    total_rows = 0
+
+    # Get initial row count
+    cursor.execute("SELECT COUNT(*) FROM state_aid_awards")
+    initial_row_count = cursor.fetchone()[0]
+
+    processed_rows = 0
     total_pages = 0
 
     while True:
@@ -232,7 +237,7 @@ def scrape_and_process(db_params):
 
             # Extract data from the HTML
             data_rows = extract_data_from_html_content(tree)
-            total_rows += len(data_rows)
+            processed_rows += len(data_rows)
             total_pages += 1
 
             # Insert into database
@@ -246,10 +251,19 @@ def scrape_and_process(db_params):
             if data["offset"] > max:
                 break
 
+    # Get final row count to determine how many new rows were inserted
+    cursor.execute("SELECT COUNT(*) FROM state_aid_awards")
+    final_row_count = cursor.fetchone()[0]
+    new_rows_inserted = final_row_count - initial_row_count
+
     cursor.close()
     conn.close()
+
     click.echo(
-        f"Completed processing {total_pages} pages with {total_rows} total rows."
+        f"Completed processing {total_pages} pages with {processed_rows} total rows."
+    )
+    click.echo(
+        f"Inserted {new_rows_inserted} new records, skipped {processed_rows - new_rows_inserted} duplicates."
     )
 
 
@@ -357,7 +371,9 @@ def setup_database(db_params):
         financial_intermediaries TEXT,
         published_date DATE,
         beneficiary_ms TEXT,
-        third_party_non_eu_country TEXT
+        third_party_non_eu_country TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        UNIQUE (sa_number, ref_no, national_id, beneficiary_name, date_granted)
     );
     """
     )
@@ -417,6 +433,19 @@ def insert_data(conn, cursor, data_rows, file_name):
 
                 db_row[db_col] = value
 
+        # Ensure key fields are not NULL - use placeholder values for missing data
+        # These placeholders help maintain uniqueness while preventing NULL values in the key
+        if not db_row.get("sa_number"):
+            db_row["sa_number"] = "UNKNOWN"
+        if not db_row.get("ref_no"):
+            db_row["ref_no"] = "UNKNOWN"
+        if not db_row.get("national_id"):
+            db_row["national_id"] = "UNKNOWN"
+        if not db_row.get("beneficiary_name"):
+            db_row["beneficiary_name"] = "UNKNOWN"
+        if not db_row.get("date_granted"):
+            db_row["date_granted"] = "1900-01-01"  # Default date for missing dates
+
         insert_data.append(db_row)
 
     # Prepare SQL statement with all possible columns
@@ -426,12 +455,18 @@ def insert_data(conn, cursor, data_rows, file_name):
     sql = f"""
     INSERT INTO state_aid_awards ({', '.join(columns)})
     VALUES ({', '.join(placeholders)})
+    ON CONFLICT (sa_number, ref_no, national_id, beneficiary_name, date_granted) DO NOTHING
     """
 
     # Execute batch insert
     execute_batch(cursor, sql, insert_data, page_size=100)
     conn.commit()
-    print(f"Inserted {len(insert_data)} rows from {file_name}")
+
+    # Execute a separate query to count how many rows were actually inserted
+    cursor.execute("SELECT COUNT(*) FROM state_aid_awards")
+    total_rows_after = cursor.fetchone()[0]
+
+    print(f"Processed {len(insert_data)} rows from {file_name}, skipping duplicates")
 
 
 @click.group()
@@ -441,17 +476,21 @@ def cli():
     load_dotenv()
 
 
-@cli.command()
-def run():
-    """Scrape data from the EU State Aid Transparency Register and directly import to the database."""
-    # Database connection parameters from environment variables
-    db_params = {
+def get_db_params():
+    """Get database connection parameters from environment variables."""
+    return {
         "dbname": os.getenv("DB_NAME", "state_aid_db"),
         "user": os.getenv("DB_USER", "postgres"),
         "password": os.getenv("DB_PASSWORD", ""),
         "host": os.getenv("DB_HOST", "localhost"),
         "port": os.getenv("DB_PORT", "5432"),
     }
+
+
+@cli.command()
+def run():
+    """Scrape data from the EU State Aid Transparency Register and directly import to the database."""
+    db_params = get_db_params()
 
     click.echo("Fetching and importing data directly to database...")
     scrape_and_process(db_params)
