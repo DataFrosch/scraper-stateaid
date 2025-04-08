@@ -1,5 +1,4 @@
 import re
-import requests
 from requests import Session
 from lxml.html import fromstring
 from time import sleep
@@ -23,7 +22,36 @@ def configure_session(
             "",
         ],
         "countries": [
+            "CountryAUT",
+            "CountryBEL",
+            "CountryBGR",
+            "CountryHRV",
+            "CountryCYP",
+            "CountryCZE",
+            "CountryDNK",
+            "CountryEST",
+            "CountryEIB",
+            "CountryFIN",
+            "CountryFRA",
+            "CountryDEU",
+            "CountryGRC",
+            "CountryHUN",
+            "CountryISL",
+            "CountryIRL",
+            "CountryITA",
+            "CountryLVA",
+            "CountryLTU",
+            "CountryLUX",
+            "CountryMLT",
             "CountryNLD",
+            "CountryPOL",
+            "CountryPRT",
+            "CountryROM",
+            "CountrySVK",
+            "CountrySVN",
+            "CountryESP",
+            "CountrySWE",
+            "CountryGBR",
         ],
         "lang": "en",
     }
@@ -50,7 +78,65 @@ def configure_session(
     data = [
         ("resetSearch", "true"),
         ("_countries", ""),
+        ("countries", "CountryAUT"),
+        ("_countries", ""),
+        ("countries", "CountryBEL"),
+        ("_countries", ""),
+        ("countries", "CountryBGR"),
+        ("_countries", ""),
+        ("countries", "CountryHRV"),
+        ("_countries", ""),
+        ("countries", "CountryCYP"),
+        ("_countries", ""),
+        ("countries", "CountryCZE"),
+        ("_countries", ""),
+        ("countries", "CountryDNK"),
+        ("_countries", ""),
+        ("countries", "CountryEST"),
+        ("_countries", ""),
+        ("countries", "CountryEIB"),
+        ("_countries", ""),
+        ("countries", "CountryFIN"),
+        ("_countries", ""),
+        ("countries", "CountryFRA"),
+        ("_countries", ""),
+        ("countries", "CountryDEU"),
+        ("_countries", ""),
+        ("countries", "CountryGRC"),
+        ("_countries", ""),
+        ("countries", "CountryHUN"),
+        ("_countries", ""),
+        ("countries", "CountryISL"),
+        ("_countries", ""),
+        ("countries", "CountryIRL"),
+        ("_countries", ""),
+        ("countries", "CountryITA"),
+        ("_countries", ""),
+        ("countries", "CountryLVA"),
+        ("_countries", ""),
+        ("countries", "CountryLTU"),
+        ("_countries", ""),
+        ("countries", "CountryLUX"),
+        ("_countries", ""),
+        ("countries", "CountryMLT"),
+        ("_countries", ""),
         ("countries", "CountryNLD"),
+        ("_countries", ""),
+        ("countries", "CountryPOL"),
+        ("_countries", ""),
+        ("countries", "CountryPRT"),
+        ("_countries", ""),
+        ("countries", "CountryROM"),
+        ("_countries", ""),
+        ("countries", "CountrySVK"),
+        ("_countries", ""),
+        ("countries", "CountrySVN"),
+        ("_countries", ""),
+        ("countries", "CountryESP"),
+        ("_countries", ""),
+        ("countries", "CountrySWE"),
+        ("_countries", ""),
+        ("countries", "CountryGBR"),
     ]
 
     response = session.post(
@@ -59,11 +145,41 @@ def configure_session(
     )
 
 
-def scrape(output_dir="rawdata"):
+def scrape_and_process(db_params):
+    """Scrape data and directly process it without writing to disk."""
     data = {
         "resetSearch": "true",
         "countries": [
+            "CountryAUT",
+            "CountryBEL",
+            "CountryBGR",
+            "CountryHRV",
+            "CountryCYP",
+            "CountryCZE",
+            "CountryDNK",
+            "CountryEST",
+            "CountryEIB",
+            "CountryFIN",
+            "CountryFRA",
+            "CountryDEU",
+            "CountryGRC",
+            "CountryHUN",
+            "CountryISL",
+            "CountryIRL",
+            "CountryITA",
+            "CountryLVA",
+            "CountryLTU",
+            "CountryLUX",
+            "CountryMLT",
             "CountryNLD",
+            "CountryPOL",
+            "CountryPRT",
+            "CountryROM",
+            "CountrySVK",
+            "CountrySVN",
+            "CountryESP",
+            "CountrySWE",
+            "CountryGBR",
         ],
         "grantingAuthorityRegions": [],
         "aidMeasureTitle": "",
@@ -93,8 +209,13 @@ def scrape(output_dir="rawdata"):
 
     session = Session()
 
+    # Connect to the database
+    conn, cursor = setup_database(db_params)
+    total_rows = 0
+    total_pages = 0
+
     while True:
-        click.echo(f"Getting offset {data['offset']}...")
+        click.echo(f"Processing offset {data['offset']}...")
         response = session.post(
             "https://webgate.ec.europa.eu/competition/transparency/public/search/results?sort=serverReference&order=asc",
             data=data,
@@ -106,17 +227,30 @@ def scrape(output_dir="rawdata"):
             click.echo("Cookie expired or overload, retrying configuration...")
             configure_session(session)
         else:
-            with open(f"{output_dir}/{data['offset']}.html", "w") as fh:
-                fh.write(response.text)
+            # Parse the HTML content directly
+            tree = fromstring(response.text)
+
+            # Extract data from the HTML
+            data_rows = extract_data_from_html_content(tree)
+            total_rows += len(data_rows)
+            total_pages += 1
+
+            # Insert into database
+            insert_data(conn, cursor, data_rows, f"page_{data['offset']}")
 
             data["offset"] += 100
 
             # Get max offset to stop at some point
-            doc = fromstring(response.text)
-            max = int(doc.findall(".//a[@class='step']")[-1].text) * 100
+            max = int(tree.findall(".//a[@class='step']")[-1].text) * 100
 
             if data["offset"] > max:
                 break
+
+    cursor.close()
+    conn.close()
+    click.echo(
+        f"Completed processing {total_pages} pages with {total_rows} total rows."
+    )
 
 
 def clean_text(text):
@@ -126,18 +260,12 @@ def clean_text(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def extract_data_from_html(file_path):
-    """Extract data from an HTML file containing state aid transparency data."""
-    with open(file_path, "r", encoding="utf-8") as file:
-        content = file.read()
-
-    # Parse with lxml
-    tree = fromstring(content)
-
+def extract_data_from_html_content(tree):
+    """Extract data from an HTML tree containing state aid transparency data."""
     # Find the data table using lxml
     data_table = tree.xpath("//table[@id='resultsTable']")
     if not data_table:
-        print(f"No data table found in {file_path}")
+        click.echo("No data table found in HTML content")
         return []
 
     # Extract headers using lxml
@@ -306,34 +434,6 @@ def insert_data(conn, cursor, data_rows, file_name):
     print(f"Inserted {len(insert_data)} rows from {file_name}")
 
 
-def process_html_folder(folder_path, db_params):
-    """Process all HTML files in the given folder."""
-    # Connect to the database
-    conn, cursor = setup_database(db_params)
-
-    # Get all HTML files
-    html_files = [
-        f for f in os.listdir(folder_path) if f.endswith(".html") or f.endswith(".htm")
-    ]
-
-    total_rows = 0
-    for file_name in html_files:
-        file_path = os.path.join(folder_path, file_name)
-        print(f"Processing {file_path}...")
-
-        # Extract data
-        data_rows = extract_data_from_html(file_path)
-        total_rows += len(data_rows)
-
-        # Insert into database
-        insert_data(conn, cursor, data_rows, file_name)
-
-    cursor.close()
-    conn.close()
-
-    print(f"Completed processing {len(html_files)} files with {total_rows} total rows.")
-
-
 @click.group()
 def cli():
     """CLI for EU State Aid Transparency Register."""
@@ -342,24 +442,8 @@ def cli():
 
 
 @cli.command()
-@click.option(
-    "--output-dir", default="rawdata", help="Directory to save scraped HTML files"
-)
-def download(output_dir):
-    """Scrape data from the EU State Aid Transparency Register."""
-    # Ensure output directory exists
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    click.echo(f"Downloading data to {output_dir}...")
-    scrape(output_dir)
-    click.echo("Download completed!")
-
-
-@cli.command()
-@click.option("--input-dir", default="rawdata", help="Directory containing HTML files")
-def import_data(input_dir):
-    """Parse HTML files and import data into PostgreSQL database."""
+def run():
+    """Scrape data from the EU State Aid Transparency Register and directly import to the database."""
     # Database connection parameters from environment variables
     db_params = {
         "dbname": os.getenv("DB_NAME", "state_aid_db"),
@@ -369,9 +453,9 @@ def import_data(input_dir):
         "port": os.getenv("DB_PORT", "5432"),
     }
 
-    click.echo(f"Importing data from {input_dir}...")
-    process_html_folder(input_dir, db_params)
-    click.echo("Import completed!")
+    click.echo("Fetching and importing data directly to database...")
+    scrape_and_process(db_params)
+    click.echo("Process completed!")
 
 
 if __name__ == "__main__":
