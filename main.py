@@ -218,11 +218,12 @@ def scrape_and_process(db_params):
 
     processed_rows = 0
     total_pages = 0
+    consecutive_duplicate_pages = 0
 
     while True:
         click.echo(f"Processing offset {data['offset']}...")
         response = session.post(
-            "https://webgate.ec.europa.eu/competition/transparency/public/search/results?sort=serverReference&order=asc",
+            "https://webgate.ec.europa.eu/competition/transparency/public/search/results?sort=serverReference&order=desc",
             data=data,
         )
         if (
@@ -241,7 +242,17 @@ def scrape_and_process(db_params):
             total_pages += 1
 
             # Insert into database
-            insert_data(conn, cursor, data_rows, f"page_{data['offset']}")
+            new_rows = insert_data(conn, cursor, data_rows, f"page_{data['offset']}")
+
+            if new_rows == 0:
+                consecutive_duplicate_pages += 1
+                click.echo(f"All duplicates on this page ({consecutive_duplicate_pages}/5 consecutive)")
+            else:
+                consecutive_duplicate_pages = 0
+
+            if consecutive_duplicate_pages >= 5:
+                click.echo("Stopping early: 5 consecutive pages with no new records.")
+                break
 
             data["offset"] += 100
 
@@ -383,9 +394,9 @@ def setup_database(db_params):
 
 
 def insert_data(conn, cursor, data_rows, file_name):
-    """Insert extracted data into the database."""
+    """Insert extracted data into the database. Returns number of newly inserted rows."""
     if not data_rows:
-        return
+        return 0
 
     # Map the column names from HTML to database columns
     column_mapping = {
@@ -458,15 +469,22 @@ def insert_data(conn, cursor, data_rows, file_name):
     ON CONFLICT (sa_number, ref_no, national_id, beneficiary_name, date_granted) DO NOTHING
     """
 
+    # Count rows before insert
+    cursor.execute("SELECT COUNT(*) FROM state_aid_awards")
+    rows_before = cursor.fetchone()[0]
+
     # Execute batch insert
     execute_batch(cursor, sql, insert_data, page_size=100)
     conn.commit()
 
-    # Execute a separate query to count how many rows were actually inserted
+    # Count rows after insert
     cursor.execute("SELECT COUNT(*) FROM state_aid_awards")
-    total_rows_after = cursor.fetchone()[0]
+    rows_after = cursor.fetchone()[0]
 
-    print(f"Processed {len(insert_data)} rows from {file_name}, skipping duplicates")
+    new_rows = rows_after - rows_before
+    print(f"Processed {len(insert_data)} rows from {file_name}: {new_rows} new, {len(insert_data) - new_rows} duplicates")
+
+    return new_rows
 
 
 @click.group()
