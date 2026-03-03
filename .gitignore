@@ -1,2 +1,3 @@
 rawdata/
 .env
+__pycache__
