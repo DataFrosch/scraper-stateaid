@@ -1,5 +1,6 @@
 import re
 from requests import Session
+from requests.exceptions import ConnectionError, Timeout
 from lxml.html import fromstring
 from time import sleep
 import os
@@ -222,10 +223,24 @@ def scrape_and_process(db_params):
 
     while True:
         click.echo(f"Processing offset {data['offset']}...")
-        response = session.post(
-            "https://webgate.ec.europa.eu/competition/transparency/public/search/results?sort=serverReference&order=desc",
-            data=data,
-        )
+
+        backoff = 30
+        while True:
+            try:
+                response = session.post(
+                    "https://webgate.ec.europa.eu/competition/transparency/public/search/results?sort=serverReference&order=desc",
+                    data=data,
+                    timeout=60,
+                )
+                break
+            except (ConnectionError, Timeout) as e:
+                click.echo(f"Request failed: {e}")
+                click.echo(f"Retrying in {backoff}s...")
+                sleep(backoff)
+                backoff = min(backoff * 2, 600)
+                click.echo("Reconfiguring session...")
+                configure_session(session)
+
         if (
             "Please choose a language" in response.text
             or "currently unable to handle the request" in response.text
@@ -246,12 +261,12 @@ def scrape_and_process(db_params):
 
             if new_rows == 0:
                 consecutive_duplicate_pages += 1
-                click.echo(f"All duplicates on this page ({consecutive_duplicate_pages}/5 consecutive)")
+                click.echo(f"All duplicates on this page ({consecutive_duplicate_pages}/100 consecutive)")
             else:
                 consecutive_duplicate_pages = 0
 
-            if consecutive_duplicate_pages >= 5:
-                click.echo("Stopping early: 5 consecutive pages with no new records.")
+            if consecutive_duplicate_pages >= 100:
+                click.echo("Stopping early: 100 consecutive pages with no new records.")
                 break
 
             data["offset"] += 100
