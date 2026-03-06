@@ -146,7 +146,7 @@ def configure_session(
     )
 
 
-def scrape_and_process(db_params):
+def scrape_and_process(db_params, duplicate_page_limit=100):
     """Scrape data and directly process it without writing to disk."""
     data = {
         "resetSearch": "true",
@@ -261,12 +261,12 @@ def scrape_and_process(db_params):
 
             if new_rows == 0:
                 consecutive_duplicate_pages += 1
-                click.echo(f"All duplicates on this page ({consecutive_duplicate_pages}/100 consecutive)")
+                click.echo(f"All duplicates on this page ({consecutive_duplicate_pages}/{duplicate_page_limit} consecutive)")
             else:
                 consecutive_duplicate_pages = 0
 
-            if consecutive_duplicate_pages >= 100:
-                click.echo("Stopping early: 100 consecutive pages with no new records.")
+            if consecutive_duplicate_pages >= duplicate_page_limit:
+                click.echo(f"Stopping early: {duplicate_page_limit} consecutive pages with no new records.")
                 break
 
             data["offset"] += 100
@@ -521,12 +521,13 @@ def get_db_params():
 
 
 @cli.command()
-def run():
+@click.option("--duplicate-page-limit", default=100, envvar="DUPLICATE_PAGE_LIMIT", type=int, help="Stop after N consecutive all-duplicate pages")
+def run(duplicate_page_limit):
     """Scrape data from the EU State Aid Transparency Register and directly import to the database."""
     db_params = get_db_params()
 
     click.echo("Fetching and importing data directly to database...")
-    scrape_and_process(db_params)
+    scrape_and_process(db_params, duplicate_page_limit)
     click.echo("Process completed!")
 
 
