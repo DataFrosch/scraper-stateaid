@@ -188,6 +188,141 @@ class TestCookieExpiredCheck:
         assert "currently unable to handle the request" not in text
 
 
+class TestConfigureSessionRetry:
+    """Test retry logic inside configure_session()."""
+
+    def _make_get_response(self, with_cookie=True):
+        resp = MagicMock()
+        if with_cookie:
+            resp.headers = {"set-cookie": "LB_TRANSPARENCY=abc123; Path=/"}
+        else:
+            resp.headers = {}
+        return resp
+
+    @patch("main.sleep")
+    @patch("main.click")
+    def test_success_on_first_try(self, mock_click, mock_sleep):
+        """configure_session succeeds when both requests work."""
+        from main import configure_session
+
+        session = MagicMock()
+        session.get.return_value = self._make_get_response()
+        session.post.return_value = MagicMock()
+
+        configure_session(session)
+
+        assert session.get.call_count == 1
+        assert session.post.call_count == 1
+        session.cookies.set.assert_called_once_with("LB_TRANSPARENCY", "abc123")
+        mock_sleep.assert_not_called()
+
+    @patch("main.sleep")
+    @patch("main.click")
+    def test_retries_on_get_connection_error(self, mock_click, mock_sleep):
+        """configure_session retries when GET raises ConnectionError."""
+        from main import configure_session
+
+        session = MagicMock()
+        session.get.side_effect = [
+            ConnectionError("Connection refused"),
+            self._make_get_response(),
+        ]
+        session.post.return_value = MagicMock()
+
+        configure_session(session)
+
+        assert session.get.call_count == 2
+        assert session.post.call_count == 1
+        mock_sleep.assert_called_once_with(30)
+
+    @patch("main.sleep")
+    @patch("main.click")
+    def test_retries_on_post_timeout(self, mock_click, mock_sleep):
+        """configure_session retries when POST raises Timeout."""
+        from main import configure_session
+
+        session = MagicMock()
+        session.get.return_value = self._make_get_response()
+        session.post.side_effect = [
+            Timeout("Read timed out"),
+            MagicMock(),
+        ]
+
+        configure_session(session)
+
+        # GET called twice (retry restarts the whole block)
+        assert session.get.call_count == 2
+        assert session.post.call_count == 2
+        mock_sleep.assert_called_once_with(30)
+
+    @patch("main.sleep")
+    @patch("main.click")
+    def test_retries_when_cookie_missing(self, mock_click, mock_sleep):
+        """configure_session retries when LB_TRANSPARENCY cookie is not in response."""
+        from main import configure_session
+
+        session = MagicMock()
+        session.get.side_effect = [
+            self._make_get_response(with_cookie=False),
+            self._make_get_response(with_cookie=True),
+        ]
+        session.post.return_value = MagicMock()
+
+        configure_session(session)
+
+        assert session.get.call_count == 2
+        mock_sleep.assert_called_once_with(30)
+
+    @patch("main.sleep")
+    @patch("main.click")
+    def test_backoff_increases(self, mock_click, mock_sleep):
+        """Backoff doubles on each retry, caps at 600."""
+        from main import configure_session
+
+        session = MagicMock()
+        session.get.side_effect = [
+            ConnectionError("fail 1"),
+            ConnectionError("fail 2"),
+            ConnectionError("fail 3"),
+            self._make_get_response(),
+        ]
+        session.post.return_value = MagicMock()
+
+        configure_session(session)
+
+        assert mock_sleep.call_args_list == [call(30), call(60), call(120)]
+
+    @patch("main.sleep")
+    @patch("main.click")
+    def test_timeout_param_on_get(self, mock_click, mock_sleep):
+        """GET request includes timeout=60."""
+        from main import configure_session
+
+        session = MagicMock()
+        session.get.return_value = self._make_get_response()
+        session.post.return_value = MagicMock()
+
+        configure_session(session)
+
+        get_call = session.get.call_args
+        assert get_call.kwargs.get("timeout") == 60
+
+    @patch("main.sleep")
+    @patch("main.click")
+    def test_timeout_param_on_post(self, mock_click, mock_sleep):
+        """POST request includes timeout=60."""
+        from main import configure_session
+
+        session = MagicMock()
+        session.get.return_value = self._make_get_response()
+        session.post.return_value = MagicMock()
+
+        configure_session(session)
+
+        post_call = session.post.call_args
+        assert post_call.kwargs.get("timeout") == 60
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

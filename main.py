@@ -57,25 +57,6 @@ def configure_session(
         "lang": "en",
     }
 
-    response = session.get(
-        "https://webgate.ec.europa.eu/competition/transparency/public",
-        params=params,
-    )
-
-    try:
-        match = re.search("LB_TRANSPARENCY=([^;]+)", response.headers.get("set-cookie"))
-        session.cookies.set("LB_TRANSPARENCY", match.group(1))
-
-    except TypeError:
-        sleep(100)
-
-        response = session.get(
-            "https://webgate.ec.europa.eu/competition/transparency/public",
-            params=params,
-        )
-        match = re.search("LB_TRANSPARENCY=([^;]+)", response.headers.get("set-cookie"))
-        session.cookies.set("LB_TRANSPARENCY", match.group(1))
-
     data = [
         ("resetSearch", "true"),
         ("_countries", ""),
@@ -140,13 +121,38 @@ def configure_session(
         ("countries", "CountryGBR"),
     ]
 
-    response = session.post(
-        "https://webgate.ec.europa.eu/competition/transparency/public/search",
-        data=data,
-    )
+    backoff = 30
+    while True:
+        try:
+            response = session.get(
+                "https://webgate.ec.europa.eu/competition/transparency/public",
+                params=params,
+                timeout=60,
+            )
+
+            cookie_header = response.headers.get("set-cookie")
+            match = re.search("LB_TRANSPARENCY=([^;]+)", cookie_header) if cookie_header else None
+            if match:
+                session.cookies.set("LB_TRANSPARENCY", match.group(1))
+            else:
+                click.echo("No LB_TRANSPARENCY cookie found, retrying...")
+                raise ConnectionError("Missing LB_TRANSPARENCY cookie")
+
+            session.post(
+                "https://webgate.ec.europa.eu/competition/transparency/public/search",
+                data=data,
+                timeout=60,
+            )
+            break
+
+        except (ConnectionError, Timeout) as e:
+            click.echo(f"configure_session failed: {e}")
+            click.echo(f"Retrying in {backoff}s...")
+            sleep(backoff)
+            backoff = min(backoff * 2, 600)
 
 
-def scrape_and_process(db_params, duplicate_page_limit=100):
+def scrape_and_process(db_params):
     """Scrape data and directly process it without writing to disk."""
     data = {
         "resetSearch": "true",
@@ -204,9 +210,12 @@ def scrape_and_process(db_params, duplicate_page_limit=100):
         "grantingAuthorityNames": "",
         "entrustedEntities": "",
         "financialIntermediaries": "",
-        "offset": 0,
+        "offset": int(os.getenv("START_PAGE", "0")) * 100,
         "max": 100,
     }
+
+    if data["offset"] > 0:
+        click.echo(f"Starting from page {data['offset'] // 100} (offset {data['offset']})")
 
     session = Session()
 
@@ -219,7 +228,6 @@ def scrape_and_process(db_params, duplicate_page_limit=100):
 
     processed_rows = 0
     total_pages = 0
-    consecutive_duplicate_pages = 0
 
     while True:
         click.echo(f"Processing offset {data['offset']}...")
@@ -257,17 +265,7 @@ def scrape_and_process(db_params, duplicate_page_limit=100):
             total_pages += 1
 
             # Insert into database
-            new_rows = insert_data(conn, cursor, data_rows, f"page_{data['offset']}")
-
-            if new_rows == 0:
-                consecutive_duplicate_pages += 1
-                click.echo(f"All duplicates on this page ({consecutive_duplicate_pages}/{duplicate_page_limit} consecutive)")
-            else:
-                consecutive_duplicate_pages = 0
-
-            if consecutive_duplicate_pages >= duplicate_page_limit:
-                click.echo(f"Stopping early: {duplicate_page_limit} consecutive pages with no new records.")
-                break
+            insert_data(conn, cursor, data_rows, f"page_{data['offset']}")
 
             data["offset"] += 100
 
@@ -521,13 +519,12 @@ def get_db_params():
 
 
 @cli.command()
-@click.option("--duplicate-page-limit", default=100, envvar="DUPLICATE_PAGE_LIMIT", type=int, help="Stop after N consecutive all-duplicate pages")
-def run(duplicate_page_limit):
+def run():
     """Scrape data from the EU State Aid Transparency Register and directly import to the database."""
     db_params = get_db_params()
 
     click.echo("Fetching and importing data directly to database...")
-    scrape_and_process(db_params, duplicate_page_limit)
+    scrape_and_process(db_params)
     click.echo("Process completed!")
 
 
